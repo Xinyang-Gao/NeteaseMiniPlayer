@@ -171,6 +171,11 @@ class NeteaseMiniPlayer {
         this.idleTimeout = null;
         this.idleDelay = 5000;
         this.isIdle = false;
+        this.isDragging = false;
+        this.dragStartX = 0;
+        this.dragStartY = 0;
+        this.initialLeft = 0;
+        this.initialTop = 0;
     }
     /**
      * 解析容器上的`data-*`属性为内部配置
@@ -1736,20 +1741,200 @@ class NeteaseMiniPlayer {
         }
     }
     /**
-     * 预留的拖拽定位功能（当前禁用）
+     * 可拖拽交互元素的CSS选择器，用于排除控件区域
+     * @type {string}
+     * @private
+     */
+    static DRAG_EXCLUDE_SELECTOR = [
+        '.control-btn',
+        '.feature-btn',
+        '.progress-bar-container',
+        '.volume-slider',
+        '.volume-slider-container',
+        '.playlist-container',
+        '.playlist-content',
+        'a',
+        'button',
+        'input',
+        'select'
+    ].join(', ');
+
+    /**
+     * 实现拖拽定位功能，支持鼠标/触摸、边缘吸附与空闲状态联动
      * @returns {void}
      * @description
-     * 1. 当前为预留接口，仅返回不做任何操作
-     * 2. 计划实现播放器的拖拽定位功能
-     * 3. 将支持在页面中自由拖动播放器到任意位置
-     * 4. 需要处理拖拽开始、移动、结束等事件
-     * @todo 实现拖拽定位功能，支持播放器在页面中的自由拖动
+     * 1. 同时绑定 mouse/touch 事件，统一通过 _onDragStart/_onDragMove/_onDragEnd 处理
+     * 2. 使用 closest() 精确排除按钮、进度条、音量条等交互控件
+     * 3. 拖拽开始时清除空闲计时器、移除 idle/docked 类、添加 dragging 视觉反馈
+     * 4. 拖拽过程中禁用 CSS transition 保证跟手流畅
+     * 5. 拖拽结束后执行边缘吸附，最小化状态下重新启动空闲计时器
      * @example
-     * player.setupDragAndDrop(); // 当前无实际操作
+     * player.setupDragAndDrop();
      * @private
      */
     setupDragAndDrop() {
-        return;
+        this.snapThreshold = 20;
+        this.element.style.position = 'fixed';
+
+        const onDragStart = (e) => this._onDragStart(e);
+        this.element.addEventListener('mousedown', onDragStart);
+        this.element.addEventListener('touchstart', onDragStart, { passive: false });
+
+        this._boundDragMove = (e) => this._onDragMove(e);
+        this._boundDragEnd = (e) => this._onDragEnd(e);
+    }
+
+    /**
+     * 统一拖拽开始处理（鼠标和触摸）
+     * @param {MouseEvent|TouchEvent} e
+     * @private
+     */
+    _onDragStart(e) {
+        const target = e.target;
+        if (target.closest(NeteaseMiniPlayer.DRAG_EXCLUDE_SELECTOR)) {
+            return;
+        }
+
+        const point = e.touches ? e.touches[0] : e;
+        if (!point) return;
+
+        if (e.type === 'touchstart') {
+            e.preventDefault();
+        } else {
+            e.preventDefault();
+        }
+
+        this.clearIdleTimer();
+        this.isIdle = false;
+        this.element.classList.remove(
+            'idle', 'fading-in', 'fading-out',
+            'docked-left', 'docked-right',
+            'popping-left', 'popping-right'
+        );
+
+        this.isDragging = true;
+        this.element.classList.add('dragging');
+        this.element.style.transition = 'none';
+        this.element.style.zIndex = '9999';
+        this.element.style.cursor = 'grabbing';
+
+        this.dragStartX = point.clientX;
+        this.dragStartY = point.clientY;
+        const rect = this.element.getBoundingClientRect();
+        this.initialLeft = rect.left;
+        this.initialTop = rect.top;
+
+        document.addEventListener('mousemove', this._boundDragMove);
+        document.addEventListener('mouseup', this._boundDragEnd);
+        document.addEventListener('touchmove', this._boundDragMove, { passive: false });
+        document.addEventListener('touchend', this._boundDragEnd);
+        document.addEventListener('touchcancel', this._boundDragEnd);
+    }
+
+    /**
+     * 统一拖拽移动处理（鼠标和触摸）
+     * @param {MouseEvent|TouchEvent} e
+     * @private
+     */
+    _onDragMove = (e) => {
+        if (!this.isDragging) return;
+
+        // 触摸时阻止页面滚动
+        if (e.type === 'touchmove') {
+            e.preventDefault();
+        }
+
+        const point = e.touches ? e.touches[0] : e;
+        if (!point) return;
+
+        const deltaX = point.clientX - this.dragStartX;
+        const deltaY = point.clientY - this.dragStartY;
+
+        let newLeft = this.initialLeft + deltaX;
+        let newTop = this.initialTop + deltaY;
+
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const pw = this.element.offsetWidth;
+        const ph = this.element.offsetHeight;
+        newLeft = Math.max(0, Math.min(newLeft, vw - pw));
+        newTop = Math.max(0, Math.min(newTop, vh - ph));
+
+        this.element.style.left = `${newLeft}px`;
+        this.element.style.top = `${newTop}px`;
+    }
+
+    /**
+     * 统一拖拽结束处理（鼠标和触摸）
+     * @param {MouseEvent|TouchEvent} e
+     * @private
+     */
+    _onDragEnd = (e) => {
+        if (!this.isDragging) return;
+
+        this.isDragging = false;
+
+        document.removeEventListener('mousemove', this._boundDragMove);
+        document.removeEventListener('mouseup', this._boundDragEnd);
+        document.removeEventListener('touchmove', this._boundDragMove);
+        document.removeEventListener('touchend', this._boundDragEnd);
+        document.removeEventListener('touchcancel', this._boundDragEnd);
+
+        this.element.classList.remove('dragging');
+        this.element.style.zIndex = '';
+        this.element.style.cursor = '';
+
+        this.snapToEdge();
+
+        if (this.isMinimized) {
+            this.startIdleTimer();
+        }
+    }
+
+    /**
+     * 边缘吸附 检测播放器与视口四边的距离，小于阈值自动贴边
+     * @returns {void}
+     * @private
+     */
+    snapToEdge() {
+        const rect = this.element.getBoundingClientRect();
+        const vw = window.innerWidth;
+        const vh = window.innerHeight;
+        const threshold = this.snapThreshold || 20;
+
+        let snappedLeft = rect.left;
+        let snappedTop = rect.top;
+        let didSnap = false;
+
+        if (rect.left < threshold) {
+            snappedLeft = 0;
+            didSnap = true;
+        } else if (vw - rect.right < threshold) {
+            snappedLeft = vw - rect.width;
+            didSnap = true;
+        }
+
+        if (rect.top < threshold) {
+            snappedTop = 0;
+            didSnap = true;
+        } else if (vh - rect.bottom < threshold) {
+            snappedTop = vh - rect.height;
+            didSnap = true;
+        }
+
+        if (didSnap) {
+            this.element.style.transition = 'left 0.2s ease, top 0.2s ease';
+            this.element.style.left = `${snappedLeft}px`;
+            this.style.top = `${snappedTop}px`;
+
+            const onTransitionEnd = () => {
+                this.element.style.transition = 'none';
+                this.element.removeEventListener('transitionend', onTransitionEnd);
+            };
+            this.element.addEventListener('transitionend', onTransitionEnd);
+        } else {
+            this.element.style.transition = 'none';
+        }
     }
     /**
      * 统一的错误展示（替换标题与歌词区域）
