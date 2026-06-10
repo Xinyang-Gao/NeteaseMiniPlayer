@@ -673,22 +673,33 @@ class NeteaseMiniPlayer {
         }
     }
     /**
-     * 计算当前停靠方向
-     * @returns {'left'|'right'} 返回停靠侧边枚举
+     * 计算当前空闲停靠方向
+     * @returns {'left'|'right'|null} 返回停靠侧边枚举，用户手动拖拽后返回 null
      * @description
-     * 1. 根据配置中的position值判断停靠方向
-     * 2. 左上角和左下角返回'left'
-     * 3. 右上角和右下角返回'right'
-     * 4. 其他位置默认返回'right'
+     * 1. 若用户已手动拖拽过播放器（userDragged === true），直接返回 null，
+     *    阻止 triggerFadeOut 添加 docked-* 类及 transform，避免覆盖拖拽后的 left/top 位置
+     * 2. 未拖拽时根据配置中的 position 值判断停靠方向：
+     *    - 'top-left' / 'bottom-left' → 返回 'left'
+     *    - 'top-right' / 'bottom-right' → 返回 'right'
+     * 3. position 为 'static' 或其他未识别值时默认返回 'right'
+     * 4. 返回值被 triggerFadeOut / restoreOpacity 用于决定添加哪个方向的
+     *    docked-* / popping-* CSS 类，从而触发对应方向的侧边滑入/滑出动画
      * @example
+     * // 初始配置为左上角，未拖拽
      * player.config.position = 'top-left';
      * player.getDockSide(); // 'left'
-     * 
+     *
+     * // 初始配置为右下角，未拖拽
      * player.config.position = 'bottom-right';
      * player.getDockSide(); // 'right'
+     *
+     * // 用户手动拖拽过后，无论原始配置如何均返回 null
+     * player.userDragged = true;
+     * player.getDockSide(); // null
      * @private
      */
     getDockSide() {
+        if (this.userDragged) return null;
         const pos = this.config.position;
         if (pos === 'top-left' || pos === 'bottom-left') return 'left';
         if (pos === 'top-right' || pos === 'bottom-right') return 'right';
@@ -1741,7 +1752,7 @@ class NeteaseMiniPlayer {
         }
     }
     /**
-     * 可拖拽交互元素的CSS选择器，用于排除控件区域
+     * 可拖拽交互元素的CSS选择器，用于精确排除控件区域
      * @type {string}
      * @private
      */
@@ -1774,6 +1785,8 @@ class NeteaseMiniPlayer {
      */
     setupDragAndDrop() {
         this.snapThreshold = 20;
+        this.snapMargin = 10;
+        this.userDragged = false;
         this.element.style.position = 'fixed';
 
         const onDragStart = (e) => this._onDragStart(e);
@@ -1782,6 +1795,7 @@ class NeteaseMiniPlayer {
 
         this._boundDragMove = (e) => this._onDragMove(e);
         this._boundDragEnd = (e) => this._onDragEnd(e);
+        this._boundTransitionEnd = null;
     }
 
     /**
@@ -1798,12 +1812,15 @@ class NeteaseMiniPlayer {
         const point = e.touches ? e.touches[0] : e;
         if (!point) return;
 
-        if (e.type === 'touchstart') {
-            e.preventDefault();
-        } else {
-            e.preventDefault();
+        e.preventDefault();
+
+        // 清除可能残留的过渡结束监听器，防止与本次拖拽冲突
+        if (this._boundTransitionEnd) {
+            this.element.removeEventListener('transitionend', this._boundTransitionEnd);
+            this._boundTransitionEnd = null;
         }
 
+        // 空闲状态联动：立即退出空闲/停靠态
         this.clearIdleTimer();
         this.isIdle = false;
         this.element.classList.remove(
@@ -1812,12 +1829,14 @@ class NeteaseMiniPlayer {
             'popping-left', 'popping-right'
         );
 
+        // 拖拽体验优化
         this.isDragging = true;
         this.element.classList.add('dragging');
         this.element.style.transition = 'none';
         this.element.style.zIndex = '9999';
         this.element.style.cursor = 'grabbing';
 
+        // 记录起始状态
         this.dragStartX = point.clientX;
         this.dragStartY = point.clientY;
         const rect = this.element.getBoundingClientRect();
@@ -1839,7 +1858,6 @@ class NeteaseMiniPlayer {
     _onDragMove = (e) => {
         if (!this.isDragging) return;
 
-        // 触摸时阻止页面滚动
         if (e.type === 'touchmove') {
             e.preventDefault();
         }
@@ -1853,6 +1871,7 @@ class NeteaseMiniPlayer {
         let newLeft = this.initialLeft + deltaX;
         let newTop = this.initialTop + deltaY;
 
+        // 视口边界约束
         const vw = window.innerWidth;
         const vh = window.innerHeight;
         const pw = this.element.offsetWidth;
@@ -1880,19 +1899,25 @@ class NeteaseMiniPlayer {
         document.removeEventListener('touchend', this._boundDragEnd);
         document.removeEventListener('touchcancel', this._boundDragEnd);
 
+        // 恢复拖拽视觉状态
         this.element.classList.remove('dragging');
         this.element.style.zIndex = '';
         this.element.style.cursor = '';
 
+        // 标记用户已手动拖拽，禁用基于 data-position 的自动侧边停靠
+        this.userDragged = true;
+
+        // 执行边缘吸附
         this.snapToEdge();
 
+        // 最小化状态下重启空闲计时器（仅控制透明度淡出，不再触发侧边停靠）
         if (this.isMinimized) {
             this.startIdleTimer();
         }
     }
 
     /**
-     * 边缘吸附 检测播放器与视口四边的距离，小于阈值自动贴边
+     * 边缘吸附：检测播放器与视口四边的距离，小于阈值时自动贴边（保留间距）
      * @returns {void}
      * @private
      */
@@ -1901,40 +1926,59 @@ class NeteaseMiniPlayer {
         const vw = window.innerWidth;
         const vh = window.innerHeight;
         const threshold = this.snapThreshold || 20;
+        const margin = this.snapMargin || 10;
 
         let snappedLeft = rect.left;
         let snappedTop = rect.top;
         let didSnap = false;
 
         if (rect.left < threshold) {
-            snappedLeft = 0;
+            snappedLeft = margin;
             didSnap = true;
         } else if (vw - rect.right < threshold) {
-            snappedLeft = vw - rect.width;
+            snappedLeft = vw - rect.width - margin;
             didSnap = true;
         }
 
         if (rect.top < threshold) {
-            snappedTop = 0;
+            snappedTop = margin;
             didSnap = true;
         } else if (vh - rect.bottom < threshold) {
-            snappedTop = vh - rect.height;
+            snappedTop = vh - rect.height - margin;
             didSnap = true;
         }
 
         if (didSnap) {
             this.element.style.transition = 'left 0.2s ease, top 0.2s ease';
             this.element.style.left = `${snappedLeft}px`;
-            this.style.top = `${snappedTop}px`;
+            this.element.style.top = `${snappedTop}px`;
 
-            const onTransitionEnd = () => {
+            this._boundTransitionEnd = () => {
                 this.element.style.transition = 'none';
-                this.element.removeEventListener('transitionend', onTransitionEnd);
+                this.element.removeEventListener('transitionend', this._boundTransitionEnd);
+                this._boundTransitionEnd = null;
             };
-            this.element.addEventListener('transitionend', onTransitionEnd);
+            this.element.addEventListener('transitionend', this._boundTransitionEnd);
         } else {
             this.element.style.transition = 'none';
         }
+    }
+
+    /**
+     * 判断是否启用空闲透明度功能
+     * @returns {boolean}
+     * @description
+     * 用户手动拖拽后禁用自动侧边停靠（docked-*），
+     * 但最小化时仍允许纯透明度淡出（idle 类）。
+     * 若需完全禁用空闲效果，可将下方 isMinimized 判断改为 return false。
+     * @private
+     */
+    shouldEnableIdleOpacity() {
+        if (this.userDragged) {
+            // 拖拽后仅允许透明度淡出，triggerFadeOut 中 getDockSide 返回 null 即可跳过停靠
+            return this.isMinimized === true;
+        }
+        return this.isMinimized === true;
     }
     /**
      * 统一的错误展示（替换标题与歌词区域）
