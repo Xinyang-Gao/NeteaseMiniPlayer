@@ -907,15 +907,13 @@ class NeteaseMiniPlayer {
      * await player.loadPlaylist('123456789');
      */
     async loadPlaylist(playlistId) {
+        this.userDragged = false;
+
         const cacheKey = this.getCacheKey('playlist_all', playlistId);
         let tracks = this.getCache(cacheKey);
         if (!tracks) {
-            const response = await this.apiRequest('/playlist/track/all', {
-                id: playlistId,
-                limit: 1000, 
-                offset: 0
-            });
-            tracks = response.songs; 
+            const response = await this.apiRequest('/playlist/track/all', { id: playlistId, limit: 1000, offset: 0 });
+            tracks = response.songs;
             this.setCache(cacheKey, tracks);
         }
         this.playlist = tracks.map(song => ({
@@ -937,6 +935,8 @@ class NeteaseMiniPlayer {
      * await player.loadSingleSong('123456789');
      */
     async loadSingleSong(songId) {
+        this.userDragged = false;
+
         const cacheKey = this.getCacheKey('song', songId);
         let songData = this.getCache(cacheKey);
         if (!songData) {
@@ -1701,6 +1701,7 @@ class NeteaseMiniPlayer {
     toggleMinimize() {
         const isCurrentlyMinimized = this.element.classList.contains('minimized');
         this.isMinimized = isCurrentlyMinimized;
+
         if (!isCurrentlyMinimized) {
             this.element.classList.add('minimized');
             this.isMinimized = true;
@@ -1714,6 +1715,8 @@ class NeteaseMiniPlayer {
             this.element.classList.remove('idle', 'fading-in', 'fading-out', 'docked-left', 'docked-right', 'popping-left', 'popping-right');
             this.startIdleTimer();
         } else {
+            this.userDragged = false;
+
             this.element.classList.remove('minimized');
             this.isMinimized = false;
             if (this.elements.minimizeBtn) {
@@ -1728,6 +1731,8 @@ class NeteaseMiniPlayer {
                 this.element.classList.remove('idle', 'fading-in', 'fading-out', 'docked-left', 'docked-right', 'popping-left', 'popping-right');
             }
             this.isIdle = false;
+
+            this.element.classList.remove('docked-left', 'docked-right');
         }
     }
     /**
@@ -1784,8 +1789,9 @@ class NeteaseMiniPlayer {
      * @private
      */
     setupDragAndDrop() {
-        this.snapThreshold = 20;
-        this.snapMargin = 10;
+        this.snapThreshold = parseInt(this.element.getAttribute('data-snap-threshold')) || 20;
+        this.snapMargin = parseInt(this.element.getAttribute('data-snap-margin')) || 10;
+
         this.userDragged = false;
         this.element.style.position = 'fixed';
 
@@ -1808,19 +1814,15 @@ class NeteaseMiniPlayer {
         if (target.closest(NeteaseMiniPlayer.DRAG_EXCLUDE_SELECTOR)) {
             return;
         }
-
         const point = e.touches ? e.touches[0] : e;
         if (!point) return;
-
         e.preventDefault();
 
-        // 清除可能残留的过渡结束监听器，防止与本次拖拽冲突
         if (this._boundTransitionEnd) {
             this.element.removeEventListener('transitionend', this._boundTransitionEnd);
             this._boundTransitionEnd = null;
         }
 
-        // 空闲状态联动：立即退出空闲/停靠态
         this.clearIdleTimer();
         this.isIdle = false;
         this.element.classList.remove(
@@ -1829,14 +1831,15 @@ class NeteaseMiniPlayer {
             'popping-left', 'popping-right'
         );
 
-        // 拖拽体验优化
+        this.element.style.userSelect = 'none';
+        this.element.style.webkitUserSelect = 'none';
+
         this.isDragging = true;
         this.element.classList.add('dragging');
         this.element.style.transition = 'none';
         this.element.style.zIndex = '9999';
         this.element.style.cursor = 'grabbing';
 
-        // 记录起始状态
         this.dragStartX = point.clientX;
         this.dragStartY = point.clientY;
         const rect = this.element.getBoundingClientRect();
@@ -1899,18 +1902,19 @@ class NeteaseMiniPlayer {
         document.removeEventListener('touchend', this._boundDragEnd);
         document.removeEventListener('touchcancel', this._boundDragEnd);
 
-        // 恢复拖拽视觉状态
         this.element.classList.remove('dragging');
         this.element.style.zIndex = '';
         this.element.style.cursor = '';
 
-        // 标记用户已手动拖拽，禁用基于 data-position 的自动侧边停靠
         this.userDragged = true;
 
-        // 执行边缘吸附
+        this.element.setAttribute('data-position', 'static');
+
+        this.element.style.userSelect = '';
+        this.element.style.webkitUserSelect = '';
+
         this.snapToEdge();
 
-        // 最小化状态下重启空闲计时器（仅控制透明度淡出，不再触发侧边停靠）
         if (this.isMinimized) {
             this.startIdleTimer();
         }
@@ -1925,8 +1929,9 @@ class NeteaseMiniPlayer {
         const rect = this.element.getBoundingClientRect();
         const vw = window.innerWidth;
         const vh = window.innerHeight;
-        const threshold = this.snapThreshold || 20;
-        const margin = this.snapMargin || 10;
+
+        const threshold = this.snapThreshold;
+        const margin = this.snapMargin;
 
         let snappedLeft = rect.left;
         let snappedTop = rect.top;
@@ -1939,7 +1944,6 @@ class NeteaseMiniPlayer {
             snappedLeft = vw - rect.width - margin;
             didSnap = true;
         }
-
         if (rect.top < threshold) {
             snappedTop = margin;
             didSnap = true;
